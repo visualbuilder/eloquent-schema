@@ -1,0 +1,52 @@
+{
+    "name": "visualbuilder/eloquent-schema",
+    "description": "Eloquent model schema discovery service with MCP tools for Laravel applications",
+    "keywords": ["laravel", "eloquent", "schema", "model", "mcp", "introspection"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Visual Builder",
+            "email": "support@visualbuilder.cloud"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/support": "^11.0|^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^2.9|^3.0",
+        "phpunit/phpunit": "^10.3|^11.0"
+    },
+    "suggest": {
+        "laravel/mcp": "Required for MCP tools integration"
+    },
+    "autoload": {
+        "psr-4": {
+            "Visualbuilder\\EloquentSchema\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Visualbuilder\\EloquentSchema\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Visualbuilder\\EloquentSchema\\EloquentSchemaServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        },
+        "audit": {
+            "ignore": ["PKSA-z3gr-8qht-p93v"]
+        }
+    }
+}
