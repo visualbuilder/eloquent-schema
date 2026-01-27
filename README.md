@@ -1,4 +1,5 @@
 # Eloquent Schema
+[![run-tests](https://github.com/visualbuilder/eloquent-schema/actions/workflows/run-tests.yml/badge.svg)](https://github.com/visualbuilder/eloquent-schema/actions/workflows/run-tests.yml)
 
 Adds new MCP tools to [Laravel Boost](https://github.com/bootstrapguru/laravel-boost) for Eloquent model introspection. Designed for AI assistants and development tools that need to understand your application's data structure.
 
