@@ -108,7 +108,10 @@ Get the complete schema for an Eloquent model including columns, relationships, 
   "columns": {
     "id": "bigint",
     "user_id": "bigint",
-    "status": "string",
+    "status": {
+      "type": "enum:pending|processing|shipped|delivered",
+      "enum_class": "App\\Enums\\OrderStatus"
+    },
     "total": "decimal",
     "created_at": "datetime",
     "updated_at": "datetime"
