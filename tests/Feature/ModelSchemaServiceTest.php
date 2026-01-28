@@ -120,3 +120,13 @@ it('returns flat field list', function () {
     expect($fields)->toHaveKey('posts.id');
     expect($fields)->toHaveKey('posts.title');
 });
+
+it('detects enum casts and includes options', function () {
+    $service = app(ModelSchemaService::class);
+
+    $schema = $service->getSchema(Post::class);
+
+    expect($schema['columns'])->toHaveKey('status');
+    expect($schema['columns']['status']['type'])->toBe('enum:draft|published|archived');
+    expect($schema['columns']['status']['enum_class'])->toBe(\Visualbuilder\EloquentSchema\Tests\Fixtures\Enums\PostStatus::class);
+});

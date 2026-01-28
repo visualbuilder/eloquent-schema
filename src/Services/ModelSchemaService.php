@@ -157,10 +157,73 @@ class ModelSchemaService
     protected function getColumns(Model $model): array
     {
         $tableName = $this->getTableName($model->getTable());
+        $casts = $model->getCasts();
 
         return collect($this->getDatabaseColumns($tableName))
+            ->map(fn (array $info, string $column) => $this->applyEnumCast($info, $column, $casts))
             ->merge($this->getAccessors($model))
             ->all();
+    }
+
+    /**
+     * Apply enum information to a column from PHP cast or SQL enum type.
+     */
+    protected function applyEnumCast(array $info, string $column, array $casts): array
+    {
+        // First priority: PHP enum cast
+        if (isset($casts[$column])) {
+            $castType = $casts[$column];
+
+            // Handle enum casts - could be class string or class:EnumClass format
+            $enumClass = $castType;
+            if (str_contains($castType, ':')) {
+                $enumClass = explode(':', $castType)[1] ?? $castType;
+            }
+
+            // Check if it's a backed enum
+            if (enum_exists($enumClass)) {
+                $reflection = new \ReflectionEnum($enumClass);
+                if ($reflection->isBacked()) {
+                    $cases = array_map(
+                        fn ($case) => $case->value,
+                        $enumClass::cases()
+                    );
+
+                    $info['type'] = 'enum:' . implode('|', $cases);
+                    $info['enum_class'] = $enumClass;
+
+                    return $info;
+                }
+            }
+        }
+
+        // Second priority: SQL ENUM type - parse values from type_raw
+        if (($info['type'] ?? '') === 'enum' && isset($info['type_raw'])) {
+            $sqlEnumValues = $this->parseSqlEnumValues($info['type_raw']);
+            if (! empty($sqlEnumValues)) {
+                $info['type'] = 'enum:' . implode('|', $sqlEnumValues);
+            }
+        }
+
+        return $info;
+    }
+
+    /**
+     * Parse SQL enum values from the raw type definition.
+     * e.g., "enum('draft','published','archived')" => ['draft', 'published', 'archived']
+     *
+     * @return array<string>
+     */
+    protected function parseSqlEnumValues(string $typeRaw): array
+    {
+        if (! preg_match("/^enum\s*\((.+)\)$/i", $typeRaw, $matches)) {
+            return [];
+        }
+
+        // Parse the comma-separated quoted values
+        preg_match_all("/'([^']+)'/", $matches[1], $valueMatches);
+
+        return $valueMatches[1] ?? [];
     }
 
     /**
@@ -169,12 +232,13 @@ class ModelSchemaService
     protected function getDatabaseColumns(string $tableName): Collection
     {
         try {
-            return collect(Schema::getColumnListing($tableName))
-                ->mapWithKeys(fn (string $column) => [
-                    $column => [
-                        'name' => $column,
-                        'type' => $this->getColumnType($tableName, $column),
-                        'type_icon' => $this->getTypeIcon($this->getColumnType($tableName, $column)),
+            return collect(Schema::getColumns($tableName))
+                ->mapWithKeys(fn (array $column) => [
+                    $column['name'] => [
+                        'name' => $column['name'],
+                        'type' => $column['type_name'],
+                        'type_raw' => $column['type'],
+                        'type_icon' => $this->getTypeIcon($column['type_name']),
                         'is_accessor' => false,
                     ],
                 ]);

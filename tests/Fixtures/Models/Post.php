@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Visualbuilder\EloquentSchema\Tests\Fixtures\Enums\PostStatus;
 
 class Post extends Model
 {
@@ -16,12 +17,14 @@ class Post extends Model
         'title',
         'slug',
         'content',
+        'status',
         'published_at',
     ];
 
     protected function casts(): array
     {
         return [
+            'status' => PostStatus::class,
             'published_at' => 'datetime',
         ];
     }
