@@ -93,9 +93,9 @@ class ModelSchemaService
     /**
      * Get the complete schema for a model class.
      *
-     * When reference caching is enabled (default), only depth 1 schemas are cached
-     * individually. Deeper schemas are composed on-the-fly by linking to cached
-     * depth 1 schemas, dramatically reducing cache size and duplication.
+     * Returns a deduplicated schema where each related model appears only once
+     * in a 'definitions' object. Relationships reference these definitions
+     * instead of duplicating the schema inline.
      */
     public function getSchema(string $modelClass, int $maxDepth = 2): ?array
     {
@@ -103,39 +103,228 @@ class ModelSchemaService
             return null;
         }
 
-        if ($this->cacheTtl <= 0) {
-            return $this->buildSchema($modelClass, 0, $maxDepth, []);
-        }
-
-        // Use reference-based caching: cache depth 1 schemas, compose deeper on-the-fly
-        if ($this->useReferenceCaching && $maxDepth > 1) {
-            return $this->getSchemaWithReferences($modelClass, $maxDepth);
-        }
-
-        return Cache::remember(
-            $this->getCacheKey($modelClass, $maxDepth),
-            $this->cacheTtl,
-            fn () => $this->buildSchema($modelClass, 0, $maxDepth, [])
-        );
+        // Always use deduplicated format to minimize payload size
+        return $this->getDeduplicatedSchema($modelClass, $maxDepth);
     }
 
     /**
-     * Get schema by composing from cached depth 1 schemas.
+     * Get schema in deduplicated format with definitions.
      *
-     * This avoids storing duplicate relationship schemas in cache.
-     * Each model's base schema is cached once, then composed for deeper requests.
+     * Returns structure:
+     * [
+     *   'model' => 'App\Models\User',
+     *   'columns' => [...],
+     *   'relationships' => [
+     *     'posts' => ['name' => 'posts', 'related_model' => 'App\Models\Post', ...]
+     *   ],
+     *   'definitions' => [
+     *     'App\Models\Post' => ['model' => '...', 'columns' => [...], 'relationships' => [...]]
+     *   ]
+     * ]
      */
-    protected function getSchemaWithReferences(string $modelClass, int $maxDepth): array
+    public function getDeduplicatedSchema(string $modelClass, int $maxDepth = 2): ?array
     {
-        // Get the base schema at depth 1 (cached)
-        $baseSchema = $this->getBaseSchema($modelClass);
-
-        if ($maxDepth === 1 || empty($baseSchema['relationships'])) {
-            return $baseSchema;
+        if (! $this->isValidModel($modelClass)) {
+            return null;
         }
 
-        // Compose deeper levels by linking to cached depth 1 schemas
-        return $this->composeSchemaWithDepth($baseSchema, 1, $maxDepth, [$modelClass]);
+        $definitions = [];
+        $schema = $this->buildSchemaCollectingDefinitions($modelClass, 0, $maxDepth, [], $definitions);
+        $schema['definitions'] = $definitions;
+
+        return $schema;
+    }
+
+    /**
+     * Build schema while collecting unique model definitions.
+     *
+     * Instead of embedding full schemas in relationships, we collect each
+     * unique model's schema in $definitions and relationships just reference them.
+     */
+    protected function buildSchemaCollectingDefinitions(
+        string $modelClass,
+        int $depth,
+        int $maxDepth,
+        array $visited,
+        array &$definitions
+    ): array {
+        if (in_array($modelClass, $visited)) {
+            return [
+                'model' => $modelClass,
+                'model_short' => class_basename($modelClass),
+                'circular' => true,
+            ];
+        }
+
+        $model = new $modelClass;
+        $newVisited = [...$visited, $modelClass];
+
+        $schema = [
+            'model' => $modelClass,
+            'model_short' => class_basename($modelClass),
+            'table' => $model->getTable(),
+            'columns' => $this->getColumns($model),
+            'relationships' => [],
+        ];
+
+        if ($depth < $maxDepth) {
+            $schema['relationships'] = $this->getRelationshipsWithDefinitions(
+                $model,
+                $modelClass,
+                $depth,
+                $maxDepth,
+                $newVisited,
+                $definitions
+            );
+        }
+
+        return $schema;
+    }
+
+    /**
+     * Get relationships, adding related model schemas to definitions instead of inline.
+     */
+    protected function getRelationshipsWithDefinitions(
+        Model $model,
+        string $modelClass,
+        int $depth,
+        int $maxDepth,
+        array $visited,
+        array &$definitions
+    ): array {
+        $reflection = new ReflectionClass($model);
+
+        return collect($reflection->getMethods(ReflectionMethod::IS_PUBLIC))
+            ->filter(fn (ReflectionMethod $method) => $method->class === $modelClass)
+            ->reject(fn (ReflectionMethod $method) => $method->getNumberOfRequiredParameters() > 0)
+            ->reject(fn (ReflectionMethod $method) => $this->isExcludedMethod($method->getName()))
+            ->mapWithKeys(function (ReflectionMethod $method) use ($model, $depth, $maxDepth, $visited, &$definitions) {
+                return $this->parseRelationshipWithDefinitions(
+                    $model,
+                    $method,
+                    $depth,
+                    $maxDepth,
+                    $visited,
+                    $definitions
+                );
+            })
+            ->filter()
+            ->all();
+    }
+
+    /**
+     * Parse a relationship method, storing related schema in definitions.
+     */
+    protected function parseRelationshipWithDefinitions(
+        Model $model,
+        ReflectionMethod $method,
+        int $depth,
+        int $maxDepth,
+        array $visited,
+        array &$definitions
+    ): array {
+        // Check return type hint first
+        $returnType = $method->getReturnType();
+
+        if ($returnType instanceof ReflectionNamedType && in_array($returnType->getName(), self::RELATION_TYPES)) {
+            $info = $this->buildRelationshipWithDefinitions($model, $method, $depth, $maxDepth, $visited, $definitions);
+
+            return $info ? [$method->getName() => $info] : [];
+        }
+
+        // If method has a non-relation return type, skip invoking it
+        if ($returnType instanceof ReflectionNamedType && ! in_array($returnType->getName(), ['mixed', 'void', 'null', 'static', 'self'])) {
+            return [];
+        }
+
+        // Try invoking the method (only for methods without type hints)
+        try {
+            $result = $method->invoke($model);
+
+            if ($result instanceof Relation) {
+                return [$method->getName() => $this->buildRelationshipInfoWithDefinitions(
+                    $result,
+                    $method->getName(),
+                    $depth,
+                    $maxDepth,
+                    $visited,
+                    $definitions
+                )];
+            }
+        } catch (\Throwable) {
+            // Method threw an exception, skip it
+        }
+
+        return [];
+    }
+
+    /**
+     * Build relationship info by invoking the method, storing related schema in definitions.
+     */
+    protected function buildRelationshipWithDefinitions(
+        Model $model,
+        ReflectionMethod $method,
+        int $depth,
+        int $maxDepth,
+        array $visited,
+        array &$definitions
+    ): ?array {
+        try {
+            $result = $method->invoke($model);
+
+            return $result instanceof Relation
+                ? $this->buildRelationshipInfoWithDefinitions($result, $method->getName(), $depth, $maxDepth, $visited, $definitions)
+                : null;
+        } catch (\Throwable) {
+            $typeName = $method->getReturnType()->getName();
+
+            return [
+                'name' => $method->getName(),
+                'type' => class_basename($typeName),
+                'type_full' => $typeName,
+                'is_collection' => in_array($typeName, self::COLLECTION_RELATIONS),
+            ];
+        }
+    }
+
+    /**
+     * Build relationship info, adding related model's schema to definitions (once).
+     */
+    protected function buildRelationshipInfoWithDefinitions(
+        Relation $relation,
+        string $name,
+        int $depth,
+        int $maxDepth,
+        array $visited,
+        array &$definitions
+    ): array {
+        $relatedModel = get_class($relation->getRelated());
+        $typeName = get_class($relation);
+
+        $info = [
+            'name' => $name,
+            'type' => class_basename($typeName),
+            'type_full' => $typeName,
+            'related_model' => $relatedModel,
+            'related_model_short' => class_basename($relatedModel),
+            'is_collection' => in_array($typeName, self::COLLECTION_RELATIONS),
+        ];
+
+        // Add related model to definitions if not already there and not circular
+        if ($depth + 1 <= $maxDepth && ! in_array($relatedModel, $visited)) {
+            if (! isset($definitions[$relatedModel])) {
+                // Build and store the related model's schema in definitions
+                $definitions[$relatedModel] = $this->buildSchemaCollectingDefinitions(
+                    $relatedModel,
+                    $depth + 1,
+                    $maxDepth,
+                    $visited,
+                    $definitions
+                );
+            }
+        }
+
+        return $info;
     }
 
     /**
@@ -148,57 +337,6 @@ class ModelSchemaService
             $this->cacheTtl,
             fn () => $this->buildSchema($modelClass, 0, 1, [])
         );
-    }
-
-    /**
-     * Compose a schema with additional depth by linking relationship schemas.
-     */
-    protected function composeSchemaWithDepth(array $schema, int $currentDepth, int $maxDepth, array $visited): array
-    {
-        if ($currentDepth >= $maxDepth || empty($schema['relationships'])) {
-            return $schema;
-        }
-
-        $schema['relationships'] = collect($schema['relationships'])
-            ->map(function (array $relationInfo) use ($currentDepth, $maxDepth, $visited) {
-                // Skip if no related model or already has schema
-                if (! isset($relationInfo['related_model'])) {
-                    return $relationInfo;
-                }
-
-                $relatedModel = $relationInfo['related_model'];
-
-                // Check for circular reference
-                if (in_array($relatedModel, $visited)) {
-                    $relationInfo['schema'] = [
-                        'model' => $relatedModel,
-                        'model_short' => class_basename($relatedModel),
-                        'circular' => true,
-                    ];
-
-                    return $relationInfo;
-                }
-
-                // Get the related model's base schema (from cache)
-                $relatedSchema = $this->getBaseSchema($relatedModel);
-
-                // Recursively compose if we need more depth
-                if ($currentDepth + 1 < $maxDepth) {
-                    $relatedSchema = $this->composeSchemaWithDepth(
-                        $relatedSchema,
-                        $currentDepth + 1,
-                        $maxDepth,
-                        [...$visited, $relatedModel]
-                    );
-                }
-
-                $relationInfo['schema'] = $relatedSchema;
-
-                return $relationInfo;
-            })
-            ->all();
-
-        return $schema;
     }
 
     /**
