@@ -11,8 +11,7 @@ use Visualbuilder\EloquentSchema\Services\ModelSchemaService;
 class CacheModelsCommand extends Command
 {
     protected $signature = 'eloquent-schema:cache
-                            {--no-schema : Skip preloading individual model schemas}
-                            {--max-depth=1 : Maximum depth for relationship exploration when caching schemas}';
+                            {--no-schema : Skip preloading individual model schemas}';
 
     protected $description = 'Warm the Eloquent schema discovery and model schema cache';
 
@@ -29,13 +28,12 @@ class CacheModelsCommand extends Command
         if (! $this->option('no-schema')) {
             $this->newLine();
 
-            $maxDepth = (int) $this->option('max-depth');
-
-            if ($maxDepth > 1) {
-                $this->components->warn("Depth {$maxDepth} may use significant memory for large codebases.");
-            }
-
-            $this->components->info('Preloading model schemas...');
+            $this->components->info('Preloading model schemas (depth 1)...');
+            $this->components->bulletList([
+                'Only base schemas are cached (one per model)',
+                'Deeper relationships are composed on-the-fly from cached schemas',
+                'This eliminates duplication and reduces cache size by ~90%',
+            ]);
 
             $models = $discoveryService->getModels(includeVendor: true);
             $memoryLimit = $this->getMemoryLimitBytes();
@@ -52,13 +50,14 @@ class CacheModelsCommand extends Command
                 if ($memoryLimit > 0 && memory_get_usage(true) > $memoryLimit * 0.85) {
                     $progressBar->finish();
                     $this->newLine(2);
-                    $this->components->error('Approaching memory limit - stopping early. Try --max-depth=1');
+                    $this->components->error('Approaching memory limit - stopping early.');
                     $skipped = count($models) - $cached - $failed;
                     break;
                 }
 
                 try {
-                    $schemaService->getSchema($model, $maxDepth);
+                    // Cache depth 1 schema - deeper depths will compose from these
+                    $schemaService->getSchema($model, 1);
                     $cached++;
                 } catch (\Throwable) {
                     $failed++;
@@ -73,7 +72,7 @@ class CacheModelsCommand extends Command
             $progressBar->finish();
             $this->newLine(2);
 
-            $this->components->twoColumnDetail('Schemas cached', (string) $cached);
+            $this->components->twoColumnDetail('Base schemas cached', (string) $cached);
             if ($failed > 0) {
                 $this->components->twoColumnDetail('Failed', (string) $failed);
             }

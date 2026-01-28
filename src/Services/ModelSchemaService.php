@@ -81,12 +81,21 @@ class ModelSchemaService
         '__call', '__callStatic', '__toString', '__sleep', '__wakeup',
     ];
 
+    /**
+     * Whether to use reference-based caching (stores depth 1 only, composes depth 2+).
+     */
+    protected bool $useReferenceCaching = true;
+
     public function __construct(
         protected int $cacheTtl = 3600,
     ) {}
 
     /**
      * Get the complete schema for a model class.
+     *
+     * When reference caching is enabled (default), only depth 1 schemas are cached
+     * individually. Deeper schemas are composed on-the-fly by linking to cached
+     * depth 1 schemas, dramatically reducing cache size and duplication.
      */
     public function getSchema(string $modelClass, int $maxDepth = 2): ?array
     {
@@ -98,6 +107,11 @@ class ModelSchemaService
             return $this->buildSchema($modelClass, 0, $maxDepth, []);
         }
 
+        // Use reference-based caching: cache depth 1 schemas, compose deeper on-the-fly
+        if ($this->useReferenceCaching && $maxDepth > 1) {
+            return $this->getSchemaWithReferences($modelClass, $maxDepth);
+        }
+
         return Cache::remember(
             $this->getCacheKey($modelClass, $maxDepth),
             $this->cacheTtl,
@@ -106,11 +120,103 @@ class ModelSchemaService
     }
 
     /**
+     * Get schema by composing from cached depth 1 schemas.
+     *
+     * This avoids storing duplicate relationship schemas in cache.
+     * Each model's base schema is cached once, then composed for deeper requests.
+     */
+    protected function getSchemaWithReferences(string $modelClass, int $maxDepth): array
+    {
+        // Get the base schema at depth 1 (cached)
+        $baseSchema = $this->getBaseSchema($modelClass);
+
+        if ($maxDepth === 1 || empty($baseSchema['relationships'])) {
+            return $baseSchema;
+        }
+
+        // Compose deeper levels by linking to cached depth 1 schemas
+        return $this->composeSchemaWithDepth($baseSchema, 1, $maxDepth, [$modelClass]);
+    }
+
+    /**
+     * Get the base (depth 1) schema for a model, from cache or freshly built.
+     */
+    protected function getBaseSchema(string $modelClass): array
+    {
+        return Cache::remember(
+            $this->getCacheKey($modelClass, 1),
+            $this->cacheTtl,
+            fn () => $this->buildSchema($modelClass, 0, 1, [])
+        );
+    }
+
+    /**
+     * Compose a schema with additional depth by linking relationship schemas.
+     */
+    protected function composeSchemaWithDepth(array $schema, int $currentDepth, int $maxDepth, array $visited): array
+    {
+        if ($currentDepth >= $maxDepth || empty($schema['relationships'])) {
+            return $schema;
+        }
+
+        $schema['relationships'] = collect($schema['relationships'])
+            ->map(function (array $relationInfo) use ($currentDepth, $maxDepth, $visited) {
+                // Skip if no related model or already has schema
+                if (! isset($relationInfo['related_model'])) {
+                    return $relationInfo;
+                }
+
+                $relatedModel = $relationInfo['related_model'];
+
+                // Check for circular reference
+                if (in_array($relatedModel, $visited)) {
+                    $relationInfo['schema'] = [
+                        'model' => $relatedModel,
+                        'model_short' => class_basename($relatedModel),
+                        'circular' => true,
+                    ];
+
+                    return $relationInfo;
+                }
+
+                // Get the related model's base schema (from cache)
+                $relatedSchema = $this->getBaseSchema($relatedModel);
+
+                // Recursively compose if we need more depth
+                if ($currentDepth + 1 < $maxDepth) {
+                    $relatedSchema = $this->composeSchemaWithDepth(
+                        $relatedSchema,
+                        $currentDepth + 1,
+                        $maxDepth,
+                        [...$visited, $relatedModel]
+                    );
+                }
+
+                $relationInfo['schema'] = $relatedSchema;
+
+                return $relationInfo;
+            })
+            ->all();
+
+        return $schema;
+    }
+
+    /**
      * Clear the cached schema for a model.
+     *
+     * With reference caching, only depth 1 is stored, so we clear that.
+     * The maxDepth parameter is kept for backward compatibility but ignored
+     * when reference caching is enabled.
      */
     public function clearCache(string $modelClass, int $maxDepth = 2): void
     {
-        Cache::forget($this->getCacheKey($modelClass, $maxDepth));
+        // Always clear the base (depth 1) schema since that's what's cached
+        Cache::forget($this->getCacheKey($modelClass, 1));
+
+        // Also clear the requested depth for backward compatibility
+        if ($maxDepth !== 1) {
+            Cache::forget($this->getCacheKey($modelClass, $maxDepth));
+        }
     }
 
     /**
