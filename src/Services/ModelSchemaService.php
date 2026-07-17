@@ -165,6 +165,7 @@ class ModelSchemaService
             'table' => $model->getTable(),
             'columns' => $this->getColumns($model),
             'relationships' => [],
+            'scopes' => $this->getScopes($model),
         ];
 
         if ($depth < $maxDepth) {
@@ -392,6 +393,7 @@ class ModelSchemaService
             'relationships' => $depth < $maxDepth
                 ? $this->getRelationships($model, $modelClass, $depth, $maxDepth, [...$visited, $modelClass])
                 : [],
+            'scopes' => $this->getScopes($model),
         ];
     }
 
@@ -800,5 +802,58 @@ class ModelSchemaService
         }
 
         return $fields;
+    }
+
+    /**
+     * Get all scopes available on a model.
+     *
+     * Returns array of scopes with their parameters:
+     * [
+     *   'accessToWorkOrders' => [
+     *     'name' => 'accessToWorkOrders',
+     *     'method' => 'scopeAccessToWorkOrders',
+     *     'parameters' => [
+     *       ['name' => 'query', 'optional' => false],
+     *     ],
+     *   ],
+     * ]
+     */
+    protected function getScopes(Model $model): array
+    {
+        $reflection = new ReflectionClass($model);
+        $scopes = [];
+
+        foreach ($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
+            if ($method->class !== $model::class) {
+                continue;
+            }
+
+            $methodName = $method->getName();
+
+            // Check if method name starts with 'scope'
+            if (! str_starts_with($methodName, 'scope')) {
+                continue;
+            }
+
+            // Extract scope name (remove 'scope' prefix and lowercase first letter)
+            $scopeName = lcfirst(substr($methodName, 5));
+
+            // Get parameters
+            $parameters = [];
+            foreach ($method->getParameters() as $param) {
+                $parameters[] = [
+                    'name' => $param->getName(),
+                    'optional' => $param->isOptional(),
+                ];
+            }
+
+            $scopes[$scopeName] = [
+                'name' => $scopeName,
+                'method' => $methodName,
+                'parameters' => $parameters,
+            ];
+        }
+
+        return $scopes;
     }
 }
