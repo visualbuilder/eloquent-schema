@@ -128,6 +128,22 @@ class ModelSchemaService
             return null;
         }
 
+        if ($this->cacheTtl <= 0) {
+            return $this->buildDeduplicatedSchema($modelClass, $maxDepth);
+        }
+
+        return Cache::remember(
+            $this->getCacheKey($modelClass, $maxDepth),
+            $this->cacheTtl,
+            fn () => $this->buildDeduplicatedSchema($modelClass, $maxDepth)
+        );
+    }
+
+    /**
+     * Build the deduplicated schema for a model (without caching).
+     */
+    protected function buildDeduplicatedSchema(string $modelClass, int $maxDepth): array
+    {
         $definitions = [];
         $schema = $this->buildSchemaCollectingDefinitions($modelClass, 0, $maxDepth, [], $definitions);
         $schema['definitions'] = $definitions;
@@ -311,10 +327,12 @@ class ModelSchemaService
             'is_collection' => in_array($typeName, self::COLLECTION_RELATIONS),
         ];
 
-        // Add related model to definitions if not already there and not circular
-        if ($depth + 1 <= $maxDepth && ! in_array($relatedModel, $visited)) {
+        // Check for circular reference
+        if (in_array($relatedModel, $visited)) {
+            $info['circular'] = true;
+        } elseif ($depth + 1 <= $maxDepth) {
+            // Build and store the related model's schema in definitions
             if (! isset($definitions[$relatedModel])) {
-                // Build and store the related model's schema in definitions
                 $definitions[$relatedModel] = $this->buildSchemaCollectingDefinitions(
                     $relatedModel,
                     $depth + 1,
@@ -367,7 +385,57 @@ class ModelSchemaService
     {
         $schema = $this->getSchema($modelClass, $maxDepth);
 
-        return $schema ? $this->flattenFields($schema) : [];
+        return $schema ? $this->flattenFieldsWithDefinitions($schema) : [];
+    }
+
+    /**
+     * Flatten a deduplicated schema into a list of field paths.
+     *
+     * Relationships reference models by class name and the actual schemas live
+     * in the top-level 'definitions' map, so that map is threaded through the
+     * recursion. Circular relationships are skipped, and a per-path visited set
+     * guards against any remaining cycle in the definitions graph.
+     *
+     * @param  array<string, array>|null  $definitions
+     * @param  array<int, string>  $visited
+     * @return array<string, string>
+     */
+    protected function flattenFieldsWithDefinitions(
+        array $schema,
+        string $prefix = '',
+        ?array $definitions = null,
+        array $visited = []
+    ): array {
+        $definitions ??= $schema['definitions'] ?? [];
+
+        $fields = collect($schema['columns'] ?? [])
+            ->keys()
+            ->mapWithKeys(fn (string $column) => [
+                $prefix ? "{$prefix}.{$column}" : $column => $prefix ? "{$prefix}.{$column}" : $column,
+            ])
+            ->all();
+
+        foreach ($schema['relationships'] ?? [] as $relationName => $relationInfo) {
+            $relatedModel = $relationInfo['related_model'] ?? null;
+
+            if ($relatedModel === null || ($relationInfo['circular'] ?? false)) {
+                continue;
+            }
+
+            if (! isset($definitions[$relatedModel]) || in_array($relatedModel, $visited, true)) {
+                continue;
+            }
+
+            $newPrefix = $prefix ? "{$prefix}.{$relationName}" : $relationName;
+            $fields = array_merge($fields, $this->flattenFieldsWithDefinitions(
+                $definitions[$relatedModel],
+                $newPrefix,
+                $definitions,
+                [...$visited, $relatedModel]
+            ));
+        }
+
+        return $fields;
     }
 
     /**

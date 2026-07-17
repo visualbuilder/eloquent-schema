@@ -94,8 +94,9 @@ it('includes related model schema when depth allows', function () {
 
     $schema = $service->getSchema(Author::class, maxDepth: 2);
 
-    expect($schema['relationships']['posts'])->toHaveKey('schema');
-    expect($schema['relationships']['posts']['schema']['table'])->toBe('posts');
+    $relatedModel = $schema['relationships']['posts']['related_model'];
+    expect($schema['definitions'])->toHaveKey($relatedModel);
+    expect($schema['definitions'][$relatedModel]['table'])->toBe('posts');
 });
 
 it('detects circular references', function () {
@@ -104,8 +105,9 @@ it('detects circular references', function () {
     // Author -> posts -> author (circular)
     $schema = $service->getSchema(Author::class, maxDepth: 3);
 
-    $postsSchema = $schema['relationships']['posts']['schema'] ?? [];
-    $authorRelation = $postsSchema['relationships']['author']['schema'] ?? [];
+    $postModelClass = $schema['relationships']['posts']['related_model'];
+    $postsSchema = $schema['definitions'][$postModelClass] ?? [];
+    $authorRelation = $postsSchema['relationships']['author'] ?? [];
 
     expect($authorRelation['circular'] ?? false)->toBeTrue();
 });
