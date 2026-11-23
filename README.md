@@ -16,7 +16,7 @@ Provides complete model schemas, relationships and accessors so AI assistants ca
 ## Requirements
 
 - PHP 8.2+
-- Laravel 11, 12 or 13
+- Laravel 12 or 13
 - Laravel MCP package (optional, for MCP tools)
 
 ## Installation
